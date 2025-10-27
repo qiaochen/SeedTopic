@@ -45,7 +45,7 @@ def compute_tfidf_rep(X, n_pcs=100, idf=None, return_idf=False):
     if issparse(X):
         if idf is None:
             idf = np.log(X.shape[0] / ( np.sum(X > 0, axis=0)))
-        tfidf = ((X / X.sum(axis=1)) * idf).astype(np.float32)
+        tfidf = ((X / X.sum(axis=1)).multiply(idf)).astype(np.float32)
     else:
         if idf is None:
             idf = np.log(X.shape[0] / np.sum(X > 0, axis=0, keepdims=True))
