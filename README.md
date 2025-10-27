@@ -24,6 +24,6 @@ pip install .
 
 
 ### Run topic modelling in commandline
-Refer to demo notebook for input preperation and model training
+Refer to [demo notebook](https://github.com/qiaochen/SeededNTM/blob/main/demo/demo.ipynb) for input preperation and model training
 
 
