@@ -23,3 +23,7 @@ pip install .
 ```
 
 
+### Run topic modelling in commandline
+Refer to demo notebook for input preperation and model training
+
+
