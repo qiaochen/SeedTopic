@@ -4,10 +4,7 @@ import os
 import pandas as pd
 
 from scipy.sparse import csr_matrix, diags, identity, issparse
-from tqdm import tqdm
-import torch
-from torch.utils.data import DataLoader, Dataset
-from sklearn.cluster import KMeans
+from scipy.special import softmax
 from sklearn.decomposition import PCA
 
 
@@ -61,3 +58,13 @@ def compute_tfidf_rep(X, n_pcs=100, idf=None, return_idf=False):
     if return_idf:
         return out, idf
     return out
+
+def compute_topic_prior(adata, marker_genes, temperature=0.8):
+    cls2id = {celltype:features['topic_index'] for celltype, features in marker_genes.items()}
+    qusi_topics = []
+
+    for celltype in cls2id.keys():
+        qusi_topics.append(adata[:, marker_genes[celltype]['features']].X.sum(axis=1) / len(marker_genes[celltype]['features']))
+        
+    qusi_topics = softmax(np.hstack(qusi_topics)/temperature, axis=1).round(4)
+    return qusi_topics
