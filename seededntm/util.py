@@ -1,0 +1,63 @@
+import numpy as np
+import squidpy as sq
+import os
+import pandas as pd
+
+from scipy.sparse import csr_matrix, diags, identity, issparse
+from tqdm import tqdm
+import torch
+from torch.utils.data import DataLoader, Dataset
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+
+
+def aggregate_mean(data):
+    base = np.sum(data, axis=1)
+    if len(base.shape) == 1:
+        base = base.reshape(-1, 1)
+    data = data / base
+    means = np.mean(data, axis=0)
+    return np.log(means + 1e-15)
+
+class EarlyStopper:
+    def __init__(self, patience=20, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_training_loss = np.inf
+
+    def early_stop(self, training_loss):
+        if training_loss < self.min_training_loss:
+            self.min_training_loss = training_loss
+            self.counter = 0
+        elif training_loss > (self.min_training_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+    def reset(self):
+        self.counter = 0
+        self.min_training_loss = np.inf
+        
+def compute_tfidf_rep(X, n_pcs=100, idf=None, return_idf=False):
+    if not idf is None:
+        if len(np.shape(idf)) == 1:
+            idf = idf.reshape(1, -1)
+        
+    if issparse(X):
+        if idf is None:
+            idf = np.asarray(np.log(X.shape[0] / ( np.sum(X > 0, axis=0))))
+        tfidf = ((X / X.sum(axis=1)).toarray() * idf).astype(np.float32)
+    else:
+        if idf is None:
+            idf = np.log(X.shape[0] / np.sum(X > 0, axis=0, keepdims=True))
+        tfidf = ((X / np.sum(X, axis=1, keepdims=True))* idf).astype(np.float32)
+    
+    out = tfidf
+    if not n_pcs is None and (type(n_pcs) == int) and n_pcs > 0 and n_pcs < X.shape[1]:
+        tfidf_pca = PCA(n_pcs).fit_transform(tfidf).astype(np.float32)
+        out = tfidf_pca
+    if return_idf:
+        return out, idf
+    return out

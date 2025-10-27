@@ -1,0 +1,42 @@
+[project]
+name = "SeededNTM"
+version = "0.1.1"
+authors = [
+  { name="Chen Qiao", email="cqiao@connect.hku.hk" },
+]
+description = "SeededNTM for guided cell type deconvolution"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+  "pandas",
+  'numpy',
+  'scipy',
+  'squidpy',
+  'scikit-learn',
+  'torch',
+  'pyro-ppl',
+  'tqdm'
+]
+
+[project.urls]
+Homepage = "https://github.com/qiaochen/SeededNTM"
+Issues = "https://github.com/qiaochen/SeededNTM/issues"
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+infer_seededntm = "seededntm:main"
+
+[tool.setuptools.packages.find]
+where = ["."]  # list of folders that contain the packages (["."] by default)
+include = ["seededntm"]  # package names should match these glob patterns (["*"] by default)
+exclude = []  # exclude packages matching these glob patterns (empty by default)
+namespaces = false  # to disable scanning PEP 420 namespaces (true by default)
