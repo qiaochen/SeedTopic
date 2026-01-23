@@ -34,6 +34,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 infer_seededntm = "seededntm:main"
+infer_seededntm_mm = "seededntm:mm_main"
 
 [tool.setuptools.packages.find]
 where = ["."]  # list of folders that contain the packages (["."] by default)
