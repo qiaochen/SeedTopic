@@ -218,7 +218,7 @@ def do_experiment(
             **{key:val.to(device) for key, val in batch_data.items() if key in {'input', 'out_counts', 
                                                                                 'out_normal', 'batch_labels'}}
         )  
-        if reg_topic_prior > 0:
+        if not exp_data.condition_mask is None and reg_topic_prior > 0:
             log_theta = model.encode(
                 **{key:value.to(model.device) for key, value in batch_data.items() if key in {'input',
                                                                                      'batch_labels'}})

@@ -70,7 +70,7 @@ class Encoder(nn.Module):
             nn.GELU(),
             nn.BatchNorm1d(hid_dim, affine=False),
             nn.Dropout(dropout),
-            nn.Linear(hid_dim),
+            nn.Linear(hid_dim, hid_dim),
         )
         
         self.proj_q  = nn.Linear(hid_dim, hid_dim, bias=False) 
@@ -428,16 +428,17 @@ class MMSeededNTM(nn.Module):
                         torch.ones(1, device=self.device)
                     )
             )
-                
-            with pyro.plate(f"Dim_seed_bg", 
-                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
-                bg_seed = pyro.sample(
-                    'bg_seed',
-                    dist.Normal(
-                        torch.zeros(1, device=self.device),
-                        torch.ones(1, device=self.device)
+            
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                with pyro.plate(f"Dim_seed_bg", 
+                                self.valid_condition_genes.shape[0] - self.seed_gene_dim):
+                    bg_seed = pyro.sample(
+                        'bg_seed',
+                        dist.Normal(
+                            torch.zeros(1, device=self.device),
+                            torch.ones(1, device=self.device)
+                        )
                     )
-                )
                 
         if not self.obs_info.normal_obs is None:
             with pyro.plate(f"Dim_normal", self.out_dim_normal):
@@ -543,6 +544,8 @@ class MMSeededNTM(nn.Module):
                 noise_count =  noise[:, self.obs_info.count_obs.start_id:self.obs_info.count_obs.end_id]
                 beta_rna = self._compute_topic_params(caux_count, tau_count, delta_count, lambda_count, bg_count, noise_count, is_batch=True)
                 
+                
+                
                 if self.n_batches > 1:
                     batch_tau_count = batch_tau[:self.n_topics*2]
                     batch_delta_count = batch_delta[:, self.obs_info.count_obs.start_id:self.obs_info.count_obs.end_id]
@@ -559,8 +562,13 @@ class MMSeededNTM(nn.Module):
                         top_dist_bg   = torch.softmax(beta_rna[1].masked_fill(self.seed_mask == 1, float('-inf')), dim=-1)
                         lkl_param_count = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
                     else:
-                        lkl_param_count = theta @ torch.softmax(beta_rna, dim=-1)
-                    
+                        lkl_param_count = theta @ torch.softmax(beta_rna[0], dim=-1)
+                        
+                logger.debug(f"beta_rna shape: {beta_rna.shape}")
+                # logger.debug(f"top_dist_seed shape: {top_dist_seed.shape}")
+                # logger.debug(f"top_dist_bg shape: {top_dist_bg.shape}")
+                logger.debug(f"theta shape: {theta.shape}")    
+                logger.debug(f"lkl_param_count shape: {lkl_param_count.shape}")    
                 logger.debug(f'caux {caux_count}, tau max {tau_count.max()}, tau min {tau_count.min()}')
                 logger.debug(f'delta max {delta_count.max()}, delta min {delta_count.min()}')
                 logger.debug(f'lambda_count max {lambda_count.max()}, lambda_count min {lambda_count.min()}')
@@ -695,22 +703,24 @@ class MMSeededNTM(nn.Module):
                 constraint=constraints.positive
             )
             
-            self.seed_bg_loc = pyro.param(
-                    'seed_bg_loc',
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                self.seed_bg_loc = pyro.param(
+                        'seed_bg_loc',
+                        self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
+                    )
+                self.seed_bg_scale = pyro.param(
+                    'seed_bg_scale',
                     self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
+                    constraint=constraints.positive
                 )
-            self.seed_bg_scale = pyro.param(
-                'seed_bg_scale',
-                self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
-                constraint=constraints.positive
-            )
+                with pyro.plate(f"Dim_seed_bg", 
+                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
+                    pyro.sample("bg_seed", dist.Normal(self.seed_bg_loc, self.seed_bg_scale))
         
             with pyro.plate(f"Dim_rna", self.out_dim_rna):
                 pyro.sample("disp", dist.LogNormal(self.disp_loc, self.disp_scale))
                 
-            with pyro.plate(f"Dim_seed_bg", 
-                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
-                pyro.sample("bg_seed", dist.Normal(self.seed_bg_loc, self.seed_bg_scale))
+            
                 
                 
         if not self.obs_info.normal_obs is None:
@@ -933,9 +943,12 @@ class MMSeededNTM(nn.Module):
         adjust = torch.log(bg + pseudocount) - torch.log(bg)
         beta = beta - adjust
         
-        top_dist_seed = torch.softmax(beta[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
-        top_dist_bg   = torch.softmax(beta[1], dim=-1)
-        top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0:            
+            top_dist_seed = torch.softmax(beta[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
+            top_dist_bg   = torch.softmax(beta[1], dim=-1)
+            top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
+        else:
+            top_dist = torch.softmax(beta[0], dim=-1)
         return top_dist.cpu()
     
     def beta_normal(self, pseudocount=0.1):
@@ -955,14 +968,14 @@ class MMSeededNTM(nn.Module):
         caux = self.mean(self.caux_loc[0] if self.obs_info.count_obs is None else self.caux_loc[2:], 
                          self.caux_scale[0] if self.obs_info.count_obs is None else self.caux_scale[2:])
 
-        lambda_tilde = self._compute_lambda_tilde_single(caux, tau, delta, lambda_)
+        lambda_tilde = self._compute_lambda_tilde_batch(caux, tau, delta, lambda_)
             
         noise = self.noise_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
         
-        beta = 0 + noise * lambda_tilde
-                    
-        bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(1, -1) 
-              + self.init_bg_feat.view(1, -1)).exp()
+        beta = 0 + noise.view(2, noise.shape[0], noise.shape[1]//2) * lambda_tilde
+        
+        bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(2, 1, -1) 
+              + self.init_bg_feat.view(1, 1, -1)).exp()
 
         if pseudocount > 0:
             pseudocount = torch.quantile(bg, q=pseudocount)

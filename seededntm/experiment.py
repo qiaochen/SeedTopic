@@ -83,7 +83,7 @@ def preprocess_ST(adata,
     init_bg_rna = np.log(init_bg_rna + 1e-15)
     
     init_bg_rna = None
-    init_bg_img = None
+    init_bg_gau = None
     if not out_counts is None:
         if issparse(out_counts):
             init_bg_rna = out_counts / out_counts.sum(axis=1)
@@ -93,7 +93,7 @@ def preprocess_ST(adata,
         init_bg_rna = np.log(init_bg_rna + 1e-15)
         
     if not out_normal is None:
-        init_bg_img = np.mean(out_normal, axis=0)        
+        init_bg_gau = np.mean(out_normal, axis=0)        
         
     ########
     ### Create conditional mask
@@ -107,7 +107,8 @@ def preprocess_ST(adata,
         with open(condition_feat_path, 'r') as infile:
             feature_groups = json.load(infile)
             assert(len(feature_groups) <= n_topics)
-            condition_mask = np.zeros((n_topics, out_counts.shape[1]), dtype=bool)
+            out = out_counts if out_counts is not None else out_normal
+            condition_mask = np.zeros((n_topics, out.shape[1]), dtype=bool)
             for celltype_name, record in feature_groups.items():
                 feat_list = record['features']
                 assert(adata.var_names.isin(feat_list).sum() == len(feat_list))
@@ -120,7 +121,7 @@ def preprocess_ST(adata,
         
     exp_data = ExpData(
         init_bg_rna=init_bg_rna,
-        init_bg_img=init_bg_img,
+        init_bg_gau=init_bg_gau,
         input_rep=input_rep,
         out_counts=out_counts,
         out_normal=out_normal,
@@ -177,7 +178,7 @@ def do_experiment(
             out_dim_rna = exp_data.out_counts.shape[1] if not exp_data.out_counts is None else 0,
             out_dim_normal = exp_data.out_normal.shape[1] if not exp_data.out_normal is None else 0,
             init_bg_count = exp_data.init_bg_rna,
-            init_bg_normal = exp_data.init_bg_img,
+            init_bg_normal = exp_data.init_bg_gau,
             condition_mask = exp_data.condition_mask,
             n_topics = n_topics,
             enc_hid_dim=model_hid_dim,
@@ -228,6 +229,8 @@ def do_experiment(
         adam = torch.optim.AdamW(params, lr=learning_rate, 
                                     betas=(0.90, 0.999)) 
         break
+    # pyro.render_model(model.model, model_args=(batch_data['input'].to(model.device) ,batch_data['out_counts'].to(model.device) , None, None), 
+    #                   filename=os.path.join(exp_outdir, 'plate.pdf'), render_distributions=True, render_params=True)
         
     g = torch.Generator()
     g.manual_seed(seed)
@@ -246,7 +249,7 @@ def do_experiment(
     min_epochs = early_stop_miniepochs
     
     for epoch in p_bar:
-        loss_dict = train_count_observation(
+        loss_dict = train_step(
             train_loader, 
             model, 
             elbo,
@@ -285,7 +288,10 @@ def do_experiment(
             
     topics = torch.concat(topics, dim=0)
     
-    topic_vocab = model.beta().detach().cpu().numpy()
+    return_beta_rna, return_beta_normal = True, False
+    if not exp_data.out_normal is None:
+        return_beta_rna, return_beta_normal = False, True
+    topic_vocab = model.beta(return_beta_rna=return_beta_rna, return_beta_normal=return_beta_normal).detach().cpu().numpy()
     top_names = [ f'topic_{i}' for i in range(n_topics)]
     
     df_topic = pd.DataFrame(topics, columns=top_names)
@@ -315,7 +321,7 @@ def do_experiment(
     return model, df_topic, df_top_vocab, losses
     
 
-def train_count_observation(
+def train_step(
         dataloader,
         model, 
         elbo,
