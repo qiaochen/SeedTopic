@@ -590,7 +590,7 @@ class SeededNTM(nn.Module):
                         top_dist_bg   = beta_feat[1].masked_fill(self.seed_mask == 1, 0)
                         lkl_param_feat = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
                     else:
-                        lkl_param_feat = theta @ beta_feat
+                        lkl_param_feat = theta @ beta_feat[0]
             
             if self.out_dim_rna > 0:                    
                 if self.use_nb_obs:
@@ -671,7 +671,7 @@ class SeededNTM(nn.Module):
                     feat  = pyro.sample("obs_feat",
                             dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
                             obs=out_normal
-                        )
+                    )
                 elif self.wt_fusion_top_seed == 1:
                     out_normal = out_normal[:, self.valid_condition_genes]
                     lkl_param_feat = lkl_param_feat[:, self.valid_condition_genes]
