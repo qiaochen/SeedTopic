@@ -132,7 +132,7 @@ class SeededNTM(nn.Module):
                  enc_hid_dim=32,
                  dropout=0.2,
                  clamp_logvar_max=None,
-                 scale_normal_feat=1.0,
+                 scale_normal_feat=1.0, # deprecated, to be removed
                  n_batches=1,
                  wt_fusion_top_seed = 0.5,
                  use_nb_obs = True,
@@ -149,7 +149,7 @@ class SeededNTM(nn.Module):
         enc_hid_dim: encoding hidden dimension
         dropout: dropout rate for neural layers
         clamp_top_var_max: clampping upper bound for topic variance term (lower model capacity for colapse or nan values)
-        scale_normal_feat: weight of normal feature loss, larger value will weigh normal observations more (value to be tested in new dataset)
+        # scale_normal_feat: weight of normal feature loss, larger value will weigh normal observations more (value to be tested in new dataset)
         n_batches: number of experiment batches (not training batch size)
         # prior_scale_of_nb_disp: hyperparameter scale of the halfcauchy distribution for modelling dispersion parameter of negative binomial observation distribution
         wt_fusion_top_seed: strength of imposing seeded topics over background topics, [0, 1], p would be applied to seed topics, 1-p to background topics
@@ -183,7 +183,6 @@ class SeededNTM(nn.Module):
 
         self.condition_mask = condition_mask if condition_mask is None else torch.BoolTensor(condition_mask).to(device)
         
-        
         if not self.condition_mask is None:
             self.valid_condition_genes = (self.condition_mask.sum(dim=0) > 0)
             self.seed_mask = torch.BoolTensor(condition_mask).to(device)
@@ -211,14 +210,14 @@ class SeededNTM(nn.Module):
             self.obs_info.n_units += 2
             
         if self.out_dim_normal > 0:
-            start, end = 0, self.out_dim_normal
+            start, end = 0, self.out_dim_normal*2
             if not self.obs_info.count_obs is None:
                 start += self.obs_info.count_obs.end_id
                 end   += self.obs_info.count_obs.end_id
             self.obs_info.normal_obs = ModUnit(start, end)
             self.obs_info.n_modalities += 1
-            self.obs_info.n_units += 1
-            self.obs_info.full_dim += self.out_dim_normal
+            self.obs_info.n_units += 2
+            self.obs_info.full_dim += (self.out_dim_normal * 2)
         
         logger.info(f'{self.obs_info}')
     
@@ -314,9 +313,37 @@ class SeededNTM(nn.Module):
             offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
             beta_offset = beta + offset
             _theta = theta[indices]
-            top_dist_seed = torch.softmax(beta_offset[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
-            top_dist_bg   = torch.softmax(beta_offset[1], dim=-1)
-            lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                top_dist_seed = torch.softmax(beta_offset[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
+                top_dist_bg   = torch.softmax(beta_offset[1], dim=-1)
+                lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
+            else:
+                lkl_param[indices] = _theta @ torch.softmax(beta_offset, dim=-1)
+        return lkl_param
+    
+    def _compute_with_adding_batch_effect_batch_normal(
+                                 self,
+                                 theta, 
+                                 batch_tau, 
+                                 batch_delta, 
+                                 beta, 
+                                 batch_labels,
+                                 ):
+        
+        lkl_param = torch.zeros(
+                    batch_labels.shape[0], batch_delta.shape[1]//2, device=self.device
+                )
+        for i in range(self.n_batches):
+            indices = torch.where(batch_labels == i)[0]
+            offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
+            beta_offset = torch.clamp(beta + offset, 0)
+            _theta = theta[indices]
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                top_dist_seed = beta_offset[0].masked_fill(self.condition_mask == 0, 0)
+                top_dist_bg   = beta_offset[1]
+                lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
+            else:
+                lkl_param[indices] = _theta @ beta_offset
         return lkl_param
     
     def _compute_with_adding_batch_effect_single(self,
@@ -340,16 +367,16 @@ class SeededNTM(nn.Module):
             
             if softmax:                
                 beta_seeded = torch.zeros_like(beta_offset)
-                beta_seeded = beta_seeded.masked_fill(self.condition_mask == 0, float('-inf'))
-                beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(beta_seeded.shape[0], -1)
-                beta_seeded[self.seed_mask] = beta_offset[self.seed_mask]
-                top_dist_seed = torch.softmax(beta_seeded, dim=-1)
-                top_dist_bg   = torch.softmax(beta_offset, dim=-1)
                 
-                
-                
-                lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
-                
+                if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                    beta_seeded = beta_seeded.masked_fill(self.condition_mask == 0, float('-inf'))
+                    beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(beta_seeded.shape[0], -1)
+                    beta_seeded[self.seed_mask] = beta_offset[self.seed_mask]
+                    top_dist_seed = torch.softmax(beta_seeded, dim=-1)
+                    top_dist_bg   = torch.softmax(beta_offset, dim=-1)    
+                    lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
+                else:
+                    lkl_param[indices] = _theta @ torch.softmax(beta_offset, dim=-1)
             else:
                 lkl_param[indices] = _theta @ beta_offset
         return lkl_param
@@ -384,7 +411,8 @@ class SeededNTM(nn.Module):
                         torch.ones(1, device=self.device)
                     )
             )
-                
+            
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
             with pyro.plate(f"Dim_seed_bg", 
                             self.valid_condition_genes.shape[0] - self.seed_gene_dim):
                 bg_seed = pyro.sample(
@@ -499,6 +527,8 @@ class SeededNTM(nn.Module):
                 noise_count =  noise[:, self.obs_info.count_obs.start_id:self.obs_info.count_obs.end_id]
                 beta_rna = self._compute_topic_params(caux_count, tau_count, delta_count, lambda_count, bg_count, noise_count, is_batch=True)
                 
+                
+                
                 if self.n_batches > 1:
                     batch_tau_count = batch_tau[:self.n_topics*2]
                     batch_delta_count = batch_delta[:, self.obs_info.count_obs.start_id:self.obs_info.count_obs.end_id]
@@ -507,13 +537,21 @@ class SeededNTM(nn.Module):
                                                                                     bg_seed,
                                                                                     softmax=True)
                 else:
-                    _beta_seeded = beta_rna[0].masked_fill(self.seed_mask == 0, float('-inf'))
-                    if self.use_nb_obs and not self.obs_info.count_obs is None:
-                        _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
-                    top_dist_seed = torch.softmax(_beta_seeded, dim=-1)
-                    top_dist_bg   = torch.softmax(beta_rna[1].masked_fill(self.seed_mask == 1, float('-inf')), dim=-1)
-                    lkl_param_count = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
-                    
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                        _beta_seeded = beta_rna[0].masked_fill(self.seed_mask == 0, float('-inf'))
+                        if self.use_nb_obs and not self.obs_info.count_obs is None:
+                            _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
+                        top_dist_seed = torch.softmax(_beta_seeded, dim=-1)
+                        top_dist_bg   = torch.softmax(beta_rna[1].masked_fill(self.seed_mask == 1, float('-inf')), dim=-1)
+                        lkl_param_count = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
+                    else:
+                        lkl_param_count = theta @ torch.softmax(beta_rna[0], dim=-1)
+                        
+                logger.debug(f"beta_rna shape: {beta_rna.shape}")
+                # logger.debug(f"top_dist_seed shape: {top_dist_seed.shape}")
+                # logger.debug(f"top_dist_bg shape: {top_dist_bg.shape}")
+                logger.debug(f"theta shape: {theta.shape}")    
+                logger.debug(f"lkl_param_count shape: {lkl_param_count.shape}")    
                 logger.debug(f'caux {caux_count}, tau max {tau_count.max()}, tau min {tau_count.min()}')
                 logger.debug(f'delta max {delta_count.max()}, delta min {delta_count.min()}')
                 logger.debug(f'lambda_count max {lambda_count.max()}, lambda_count min {lambda_count.min()}')
@@ -523,9 +561,9 @@ class SeededNTM(nn.Module):
                 logger.debug(f'caux_loc max {self.caux_loc}, caux_scale min {self.caux_scale}')
             
             if self.out_dim_normal > 0:
-                bg_feat = bg[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(1, -1) + self.init_bg_feat.view(1, -1)
-                caux_feat = caux[0] if self.obs_info.count_obs is None else caux[2:]
-                tau_feat = tau[:self.n_topics] if self.obs_info.count_obs is None else tau[self.n_topics:]
+                bg_feat = bg[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(2, 1, -1)+ self.init_bg_feat.view(1, 1, -1)
+                caux_feat = caux[:2] if self.obs_info.count_obs is None else caux[2:]
+                tau_feat = tau[:self.n_topics*2] if self.obs_info.count_obs is None else tau[2*self.n_topics:]
                 delta_feat = delta[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
                 lambda_feat = lambda_[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
                 noise_feat =  noise[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
@@ -535,17 +573,24 @@ class SeededNTM(nn.Module):
                                                         lambda_feat, 
                                                         bg_feat, 
                                                         noise_feat, 
-                                                        is_batch=False)
+                                                        is_batch=True)
+                beta_feat = torch.clamp(beta_feat, min=0)
                 
                 if self.n_batches > 1:
-                    batch_tau_feat = batch_tau[:self.n_topics] if self.obs_info.count_obs is None else batch_tau[self.n_topics:]
+                    batch_tau_feat = batch_tau[:self.n_topics*2] if self.obs_info.count_obs is None else batch_tau[2*self.n_topics:]
                     batch_delta_feat = batch_delta[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
-                    lkl_param_feat = self._compute_with_adding_batch_effect_single(theta, batch_tau_feat,
+                    lkl_param_feat = self._compute_with_adding_batch_effect_batch_normal(theta, batch_tau_feat,
                                                                                     batch_delta_feat, beta_feat, 
-                                                                                    batch_labels, softmax=False)
+                                                                                    batch_labels, bg_seed)
                 else:
-                    lkl_param_feat = theta @ beta_feat
-                
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                        _beta_seeded = beta_feat[0].masked_fill(self.seed_mask == 0, 0)
+                        _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
+                        top_dist_seed = _beta_seeded
+                        top_dist_bg   = beta_feat[1].masked_fill(self.seed_mask == 1, 0)
+                        lkl_param_feat = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
+                    else:
+                        lkl_param_feat = theta @ beta_feat
             
             if self.out_dim_rna > 0:                    
                 if self.use_nb_obs:
@@ -619,12 +664,12 @@ class SeededNTM(nn.Module):
                                             obs=out_counts[:, ~self.valid_condition_genes])
                         
                             
-            if self.out_dim_normal > 0 and self.scale_normal_feat > 0:
-                with pyro.poutine.scale(scale=self.scale_normal_feat):
-                    feat  = pyro.sample("obs_feat",
-                                dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
-                                obs=out_normal
-                            )
+            if self.out_dim_normal > 0:
+                # with pyro.poutine.scale(scale=self.scale_normal_feat):
+                feat  = pyro.sample("obs_feat",
+                            dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
+                            obs=out_normal
+                        )
         
                     
     def guide(self, input, out_counts=None, out_normal=None, batch_labels=None):
@@ -641,6 +686,10 @@ class SeededNTM(nn.Module):
                 constraint=constraints.positive
             )
             
+            with pyro.plate(f"Dim_rna", self.out_dim_rna):
+                pyro.sample("disp", dist.LogNormal(self.disp_loc, self.disp_scale))
+            
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
             self.seed_bg_loc = pyro.param(
                     'seed_bg_loc',
                     self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
@@ -650,13 +699,13 @@ class SeededNTM(nn.Module):
                 self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
                 constraint=constraints.positive
             )
-        
-            with pyro.plate(f"Dim_rna", self.out_dim_rna):
-                pyro.sample("disp", dist.LogNormal(self.disp_loc, self.disp_scale))
-                
             with pyro.plate(f"Dim_seed_bg", 
-                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
+                        self.valid_condition_genes.shape[0] - self.seed_gene_dim):
                 pyro.sample("bg_seed", dist.Normal(self.seed_bg_loc, self.seed_bg_scale))
+        
+            
+                
+            
                 
                 
         if not self.obs_info.normal_obs is None:
@@ -892,14 +941,14 @@ class SeededNTM(nn.Module):
             logger.warning('No normal feature output is modelled, no beta for normal features, return None')
             return None
         
-        tau = self.mean(self.tau_loc[:self.n_topics] if self.obs_info.count_obs is None else self.tau_loc[2*self.n_topics:], 
-                        self.tau_scale[:self.n_topics] if self.obs_info.count_obs is None else self.tau_scale[2*self.n_topics:])
+        tau = self.mean(self.tau_loc[:self.n_topics*2] if self.obs_info.count_obs is None else self.tau_loc[2*self.n_topics:], 
+                        self.tau_scale[:self.n_topics*2] if self.obs_info.count_obs is None else self.tau_scale[2*self.n_topics:])
         delta = self.mean(self.delta_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id], 
                           self.delta_scale[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id])
         lambda_ = self.mean(self.lambda_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id], 
                             self.lambda_scale[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id])
-        caux = self.mean(self.caux_loc[0] if self.obs_info.count_obs is None else self.caux_loc[2:], 
-                         self.caux_scale[0] if self.obs_info.count_obs is None else self.caux_scale[2:])
+        caux = self.mean(self.caux_loc[:2] if self.obs_info.count_obs is None else self.caux_loc[2:], 
+                         self.caux_scale[:2] if self.obs_info.count_obs is None else self.caux_scale[2:])
 
         lambda_tilde = self._compute_lambda_tilde_single(caux, tau, delta, lambda_)
             
