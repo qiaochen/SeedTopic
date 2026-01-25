@@ -950,14 +950,14 @@ class SeededNTM(nn.Module):
         caux = self.mean(self.caux_loc[:2] if self.obs_info.count_obs is None else self.caux_loc[2:], 
                          self.caux_scale[:2] if self.obs_info.count_obs is None else self.caux_scale[2:])
 
-        lambda_tilde = self._compute_lambda_tilde_single(caux, tau, delta, lambda_)
-            
         noise = self.noise_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
         
-        beta = 0 + noise * lambda_tilde
+        lambda_tilde = self._compute_lambda_tilde_batch(caux, tau, delta, lambda_)
+            
+        beta = 0 + noise.view(2, noise.shape[0], noise.shape[1]//2) * lambda_tilde
                     
-        bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(1, -1) 
-              + self.init_bg_feat.view(1, -1)).exp()
+        bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(2, 1, -1) 
+              + self.init_bg_feat.view(1, 1, -1)).exp()
 
         if pseudocount > 0:
             pseudocount = torch.quantile(bg, q=pseudocount)
