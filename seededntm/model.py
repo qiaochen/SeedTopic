@@ -955,18 +955,27 @@ class SeededNTM(nn.Module):
         lambda_tilde = self._compute_lambda_tilde_batch(caux, tau, delta, lambda_)
             
         beta = 0 + noise.view(2, noise.shape[0], noise.shape[1]//2) * lambda_tilde
-                    
+        
+        beta = torch.clamp(beta, min=0)
+        
         bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(2, 1, -1) 
               + self.init_bg_feat.view(1, 1, -1)).exp()
 
         if pseudocount > 0:
-            pseudocount = torch.quantile(bg, q=pseudocount)
+            pseudocount0 = torch.quantile(bg[0], q=pseudocount)
+            pseudocount1 = torch.quantile(bg[1], q=pseudocount)
+            pseudocount = torch.concat([pseudocount0.view(1,1,1),pseudocount1.view(1,1,1) ], dim=0)
         else:
             pseudocount = 0
-        
+            
         adjust = torch.log(bg + pseudocount) - torch.log(bg)
         beta = beta - adjust
-        return beta.cpu()
+        
+        top_dist_seed = beta[0].masked_fill(self.condition_mask == 0, 0)
+        top_dist_bg   = beta[1]
+        top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
+        
+        return top_dist.cpu()
 
 
     def beta(self, pseudocount=0.1, return_beta_rna=True, return_beta_normal=False):
