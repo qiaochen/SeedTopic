@@ -666,9 +666,40 @@ class SeededNTM(nn.Module):
                             
             if self.out_dim_normal > 0:
                 # with pyro.poutine.scale(scale=self.scale_normal_feat):
-                feat  = pyro.sample("obs_feat",
+                
+                if self.condition_mask is None or self.wt_fusion_top_seed == 0:
+                    feat  = pyro.sample("obs_feat",
                             dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
                             obs=out_normal
+                        )
+                elif self.wt_fusion_top_seed == 1:
+                    out_normal = out_normal[:, self.valid_condition_genes]
+                    lkl_param_feat = lkl_param_feat[:, self.valid_condition_genes]
+                    normal_scale = normal_scale[self.valid_condition_genes]
+                    
+                    feat  = pyro.sample("obs_feat",
+                            dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
+                            obs=out_normal
+                        )
+                else:
+                    out_normal_seed = out_normal[:, self.valid_condition_genes]
+                    lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                    
+                    normal_scale_seed = normal_scale[self.valid_condition_genes]
+                    
+                    with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
+                        feat  = pyro.sample("obs_feat",
+                            dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1), 
+                            obs=out_normal_seed
+                        )                        
+                    out_normal_bg = out_normal[:, ~self.valid_condition_genes]
+                    lkl_param_bg = lkl_param_feat[:, ~self.valid_condition_genes]
+                    normal_scale_bg = normal_scale[~self.valid_condition_genes]
+                        
+                    with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
+                        feat  = pyro.sample("obs_feat",
+                            dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1), 
+                            obs=out_normal_bg
                         )
         
                     
