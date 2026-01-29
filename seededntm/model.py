@@ -688,7 +688,7 @@ class SeededNTM(nn.Module):
                     normal_scale_seed = normal_scale[self.valid_condition_genes]
                     
                     with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
-                        feat  = pyro.sample("obs_feat",
+                        feat  = pyro.sample("obs_feat_seed",
                             dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1), 
                             obs=out_normal_seed
                         )                        
@@ -697,7 +697,7 @@ class SeededNTM(nn.Module):
                     normal_scale_bg = normal_scale[~self.valid_condition_genes]
                         
                     with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
-                        feat  = pyro.sample("obs_feat",
+                        feat  = pyro.sample("obs_feat_bg",
                             dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1), 
                             obs=out_normal_bg
                         )
