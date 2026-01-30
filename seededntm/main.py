@@ -48,6 +48,8 @@ def do_exp(
         seed: int=0,
         condition_feat_path: str=None,
         use_nb_obs: bool=False,
+        is_group_mode: bool=False,
+        pos_scale: float=0.5,
         device=None
     ):
     
@@ -101,6 +103,8 @@ def do_exp(
                 wt_fusion_top_seed=wt_fusion_top_seed,
                 reg_topic_prior=reg_topic_prior,
                 use_nb_obs=use_nb_obs,
+                is_group_mode=is_group_mode,
+                pos_scale=pos_scale,
                 seed=seed,
                 device=device
     )
@@ -132,6 +136,8 @@ def main():
     parser.add_argument('--device', type=str, default='auto', help='Device e.g., "cuda:0", "cpu", default: "auto"')
     
     parser.add_argument('--use_nb_obs', default=True, action=argparse.BooleanOptionalAction, help='use negative binomial observation loss for counts data')
+    parser.add_argument('--is_group_mode', default=False, action=argparse.BooleanOptionalAction, help='whether to group expression by mean as observation for elbo loss, default False')
+    parser.add_argument('--scale_binary_mode_positive', type=float, default=0.5, help='scale weight for positive topic in binary mode, default: 0.5')
     parser.add_argument('--use_multinomial_obs', default=False, action=argparse.BooleanOptionalAction, help='use multinomial observation loss for counts data')
     parser.add_argument('--early_stop', action=argparse.BooleanOptionalAction)
     parser.add_argument('--early_stop_tolerance', type=int, default=20, help='Tolerance steps of early stop during training, if early_stop is turned on, default: 20')
@@ -169,6 +175,8 @@ def main():
         seed=args.random_seed,
         condition_feat_path=args.condition_feat_path,
         use_nb_obs= not args.use_multinomial_obs,
+        is_group_mode = args.is_group_mode,
+        pos_scale = args.scale_binary_mode_positive,
         device=torch.device(args.device) if not args.device == 'auto' else (torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu'))
     )
     

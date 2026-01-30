@@ -152,6 +152,8 @@ def do_experiment(
         reg_topic_prior: float=0.5,
         n_workers: int=4,
         use_nb_obs: bool=True,
+        is_group_mode: bool=False,
+        pos_scale: float=0.5,
         seed: int=0,
         device=None
     ):
@@ -185,6 +187,8 @@ def do_experiment(
             clamp_logvar_max=clamp_logvar_max,
             scale_normal_feat=scale_normal_feat,
             wt_fusion_top_seed=wt_fusion_top_seed,
+            is_group_mode=is_group_mode,
+            pos_scale=pos_scale,
             device=device,
             n_batches=n_batches,
             use_nb_obs=use_nb_obs
