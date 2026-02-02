@@ -660,7 +660,7 @@ class MMSeededNTM(nn.Module):
                 else:
                     if self.condition_mask is None or self.wt_fusion_top_seed == 0:
                         total_count = int(out_counts.sum(-1).max())
-                        count = pyro.sample('obs_rn',
+                        count = pyro.sample('obs_rna',
                                         dist.Multinomial(total_count, lkl_param_count),
                                         obs=out_counts)
                     elif self.wt_fusion_top_seed == 1:
@@ -683,10 +683,34 @@ class MMSeededNTM(nn.Module):
                             
             if self.out_dim_normal > 0:
                 # with pyro.poutine.scale(scale=self.scale_normal_feat):
-                feat  = pyro.sample("obs_feat",
+                
+                if self.condition_mask is None or self.wt_fusion_top_seed == 0:
+                        feat  = pyro.sample("obs_feat",
                             dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
                             obs=out_normal
                         )
+                elif self.wt_fusion_top_seed == 1:
+                    lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                    normal_scale_seed = normal_scale[self.valid_condition_genes]
+                    feat = pyro.sample('obs_feat',
+                                        dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1),
+                                        obs=out_normal)
+                else:
+                    lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                    normal_scale_seed = normal_scale[self.valid_condition_genes]
+                    
+                    with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
+                        feat = pyro.sample('obs_feat_seed',
+                                        dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1),
+                                        obs=out_normal)
+                        
+                    lkl_param_bg = lkl_param_feat[:, ~self.valid_condition_genes]
+                    normal_scale_bg = normal_scale[~self.valid_condition_genes]
+                        
+                    with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
+                        feat = pyro.sample('obs_feat_bg',
+                                        dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1),
+                                        obs=out_normal)
         
                     
     def guide(self, input, out_counts=None, out_normal=None, batch_labels=None):

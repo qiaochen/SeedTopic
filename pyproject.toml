@@ -1,6 +1,6 @@
 [project]
 name = "SeededNTM"
-version = "0.1.1"
+version = "0.1.2"
 authors = [
   { name="Chen Qiao", email="cqiao@connect.hku.hk" },
 ]
