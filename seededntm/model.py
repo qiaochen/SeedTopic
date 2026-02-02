@@ -317,7 +317,7 @@ class SeededNTM(nn.Module):
             offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
             beta_offset = beta + offset
             _theta = theta[indices]
-            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
                 top_dist_seed = torch.softmax(beta_offset[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
                 top_dist_bg   = torch.softmax(beta_offset[1], dim=-1)
                 lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
@@ -342,7 +342,7 @@ class SeededNTM(nn.Module):
             offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
             beta_offset = torch.clamp(beta + offset, 0)
             _theta = theta[indices]
-            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
                 top_dist_seed = beta_offset[0].masked_fill(self.condition_mask == 0, 0)
                 top_dist_bg   = beta_offset[1]
                 lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
@@ -372,7 +372,7 @@ class SeededNTM(nn.Module):
             if softmax:                
                 beta_seeded = torch.zeros_like(beta_offset)
                 
-                if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+                if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
                     beta_seeded = beta_seeded.masked_fill(self.condition_mask == 0, float('-inf'))
                     beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(beta_seeded.shape[0], -1)
                     beta_seeded[self.seed_mask] = beta_offset[self.seed_mask]
@@ -416,7 +416,7 @@ class SeededNTM(nn.Module):
                     )
             )
             
-        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
             with pyro.plate(f"Dim_seed_bg", 
                             self.valid_condition_genes.shape[0] - self.seed_gene_dim):
                 bg_seed = pyro.sample(
@@ -541,7 +541,7 @@ class SeededNTM(nn.Module):
                                                                                     bg_seed,
                                                                                     softmax=True)
                 else:
-                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
                         _beta_seeded = beta_rna[0].masked_fill(self.seed_mask == 0, float('-inf'))
                         if self.use_nb_obs and not self.obs_info.count_obs is None:
                             _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
@@ -587,7 +587,7 @@ class SeededNTM(nn.Module):
                                                                                     batch_delta_feat, beta_feat, 
                                                                                     batch_labels, bg_seed)
                 else:
-                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
                         _beta_seeded = beta_feat[0].masked_fill(self.seed_mask == 0, 0)
                         _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
                         top_dist_seed = _beta_seeded
@@ -772,7 +772,7 @@ class SeededNTM(nn.Module):
             with pyro.plate(f"Dim_rna", self.out_dim_rna):
                 pyro.sample("disp", dist.LogNormal(self.disp_loc, self.disp_scale))
             
-        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and not self.is_group_mode:
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
             self.seed_bg_loc = pyro.param(
                     'seed_bg_loc',
                     self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
