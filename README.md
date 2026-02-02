@@ -1,6 +1,5 @@
-# SeededNTM
-Guided cell type deconvolution with SeededNTM
-
+# SeedTopic
+SeedTopic: Knowledge-informed topic modelling of spatial transcriptomics for efficient cell typing
 
 ## Create environment
 Using micromamba (change micromamba to conda if you are using conda package management)
