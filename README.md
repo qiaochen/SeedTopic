@@ -1,7 +1,7 @@
 # SeedTopic
 SeedTopic: Knowledge-informed topic modelling of spatial transcriptomics for efficient cell typing
 
-[](https://github.com/qiaochen/SeedTopic/blob/main/resources/SeedTopic.png)
+![SeedTopic](resources/SeedTopic.png)
 
 ## Create environment
 Using micromamba (change micromamba to conda if you are using conda package management)
