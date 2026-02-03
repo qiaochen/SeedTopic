@@ -126,8 +126,8 @@ def main():
     parser.add_argument('--clamp_logvar_max', type=float, default=None, help='clamp maximum value in logvar, to avoid extreme values during exponential, default: None, not clamp')
     
     parser.add_argument('--model_hid_dim', type=int, default=64, help='Model hidding layer dimension, default: 64')
-    parser.add_argument('--wt_fusion_top_seed', type=float, default=0.5, help='weight of gene seeds, non-seed gene weight is (1-wt_fusion_top_seed), default: 0.5')
-    parser.add_argument('--reg_topic_prior', type=float, default=0.5, help='regularization strength of topic alignment loss, default: 0.5')
+    parser.add_argument('--wt_fusion_top_seed', type=float, default=1.0, help='weight of gene seeds, non-seed gene weight is (1-wt_fusion_top_seed), default: 1.0')
+    parser.add_argument('--reg_topic_prior', type=float, default=0.9, help='regularization strength of topic alignment loss, a search in range [0.0, 0.5, 0.8, 0.9, 0.95 0.99] may help find the best value, default: 0.9')
     parser.add_argument('--scale_normal_feat', type=float, default=0.0, help='scale weight for normal out, default: 0.0')
     parser.add_argument('--device', type=str, default='auto', help='Device e.g., "cuda:0", "cpu", default: "auto"')
     
