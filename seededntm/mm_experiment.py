@@ -15,8 +15,8 @@ from pyro.infer import SVI, TraceMeanField_ELBO
 from scipy.sparse import issparse
 import random
 from .util import EarlyStopper
-from .data import MyDataset, ExpData
-from .model import SeededNTM
+from .mm_data import MyDataset, ExpData
+from .mm_model import MMSeededNTM
 import logging
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ def seed_everything(seed):
 def preprocess_ST(adata,
                n_topics=None,
                input_rep=None,
+               gene_emb=None,
                out_counts=None,
                out_normal=None,
                n_pcs=50,
@@ -83,7 +84,7 @@ def preprocess_ST(adata,
     init_bg_rna = np.log(init_bg_rna + 1e-15)
     
     init_bg_rna = None
-    init_bg_gau = None
+    init_bg_img = None
     if not out_counts is None:
         if issparse(out_counts):
             init_bg_rna = out_counts / out_counts.sum(axis=1)
@@ -93,7 +94,7 @@ def preprocess_ST(adata,
         init_bg_rna = np.log(init_bg_rna + 1e-15)
         
     if not out_normal is None:
-        init_bg_gau = np.mean(out_normal, axis=0)        
+        init_bg_img = np.mean(out_normal, axis=0)        
         
     ########
     ### Create conditional mask
@@ -107,8 +108,7 @@ def preprocess_ST(adata,
         with open(condition_feat_path, 'r') as infile:
             feature_groups = json.load(infile)
             assert(len(feature_groups) <= n_topics)
-            out = out_counts if out_counts is not None else out_normal
-            condition_mask = np.zeros((n_topics, out.shape[1]), dtype=bool)
+            condition_mask = np.zeros((n_topics, out_counts.shape[1]), dtype=bool)
             for celltype_name, record in feature_groups.items():
                 feat_list = record['features']
                 assert(adata.var_names.isin(feat_list).sum() == len(feat_list))
@@ -121,7 +121,8 @@ def preprocess_ST(adata,
         
     exp_data = ExpData(
         init_bg_rna=init_bg_rna,
-        init_bg_gau=init_bg_gau,
+        gene_emb=gene_emb,
+        init_bg_img=init_bg_img,
         input_rep=input_rep,
         out_counts=out_counts,
         out_normal=out_normal,
@@ -152,8 +153,6 @@ def do_experiment(
         reg_topic_prior: float=0.5,
         n_workers: int=4,
         use_nb_obs: bool=True,
-        is_group_mode: bool=False,
-        pos_scale: float=0.5,
         seed: int=0,
         device=None
     ):
@@ -175,20 +174,19 @@ def do_experiment(
     else:
         n_batches = np.unique(exp_data.batch_labels).shape[0]
     
-    model = SeededNTM(
+    model = MMSeededNTM(
             input_dim = exp_data.input_rep.shape[1],
+            gene_emb = exp_data.gene_emb,
             out_dim_rna = exp_data.out_counts.shape[1] if not exp_data.out_counts is None else 0,
             out_dim_normal = exp_data.out_normal.shape[1] if not exp_data.out_normal is None else 0,
             init_bg_count = exp_data.init_bg_rna,
-            init_bg_normal = exp_data.init_bg_gau,
+            init_bg_normal = exp_data.init_bg_img,
             condition_mask = exp_data.condition_mask,
             n_topics = n_topics,
             enc_hid_dim=model_hid_dim,
             clamp_logvar_max=clamp_logvar_max,
             scale_normal_feat=scale_normal_feat,
             wt_fusion_top_seed=wt_fusion_top_seed,
-            is_group_mode=is_group_mode,
-            pos_scale=pos_scale,
             device=device,
             n_batches=n_batches,
             use_nb_obs=use_nb_obs
@@ -220,7 +218,7 @@ def do_experiment(
             **{key:val.to(device) for key, val in batch_data.items() if key in {'input', 'out_counts', 
                                                                                 'out_normal', 'batch_labels'}}
         )  
-        if reg_topic_prior > 0:
+        if not exp_data.condition_mask is None and reg_topic_prior > 0:
             log_theta = model.encode(
                 **{key:value.to(model.device) for key, value in batch_data.items() if key in {'input',
                                                                                      'batch_labels'}})
@@ -233,8 +231,8 @@ def do_experiment(
         adam = torch.optim.AdamW(params, lr=learning_rate, 
                                     betas=(0.90, 0.999)) 
         break
-    # pyro.render_model(model.model, model_args=(batch_data['input'].to(model.device) ,batch_data['out_counts'].to(model.device) , None, None), 
-    #                   filename=os.path.join(exp_outdir, 'plate.pdf'), render_distributions=True, render_params=True)
+    pyro.render_model(model.model, model_args=(batch_data['input'].to(model.device) ,batch_data['out_counts'].to(model.device) , None, None), 
+                      filename=os.path.join(exp_outdir, 'plate.pdf'), render_distributions=True, render_params=True)
         
     g = torch.Generator()
     g.manual_seed(seed)
@@ -253,7 +251,7 @@ def do_experiment(
     min_epochs = early_stop_miniepochs
     
     for epoch in p_bar:
-        loss_dict = train_step(
+        loss_dict = train_count_observation(
             train_loader, 
             model, 
             elbo,
@@ -292,10 +290,7 @@ def do_experiment(
             
     topics = torch.concat(topics, dim=0)
     
-    return_beta_rna, return_beta_normal = True, False
-    if not exp_data.out_normal is None:
-        return_beta_rna, return_beta_normal = False, True
-    topic_vocab = model.beta(return_beta_rna=return_beta_rna, return_beta_normal=return_beta_normal).detach().cpu().numpy()
+    topic_vocab = model.beta().detach().cpu().numpy()
     top_names = [ f'topic_{i}' for i in range(n_topics)]
     
     df_topic = pd.DataFrame(topics, columns=top_names)
@@ -325,7 +320,7 @@ def do_experiment(
     return model, df_topic, df_top_vocab, losses
     
 
-def train_step(
+def train_count_observation(
         dataloader,
         model, 
         elbo,
