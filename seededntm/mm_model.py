@@ -39,7 +39,8 @@ class Encoder(nn.Module):
     SpaNTM encoder with optional batch effect removal mechanism
     """
     def __init__(self, 
-                 input_dim: int,
+                 dim_hist_emb: int,
+                 gene_emb: torch.Tensor,
                  hid_dim: int,
                  n_topics: int,
                  n_batches: int=2,
@@ -58,12 +59,24 @@ class Encoder(nn.Module):
         self.hid_dim = hid_dim
         self.clamp_logvar_max = clamp_logvar_max
         self.drop = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(
-            input_dim, 
-            hid_dim, 
-            bias=False)
-        self.tanh = nn.Tanh()
-        self.silu = nn.SiLU()
+        self.register_buffer('gene_emb', gene_emb)
+        
+        self.fc1 = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(
+                dim_hist_emb, 
+                hid_dim, 
+            ),
+            nn.GELU(),
+            nn.BatchNorm1d(hid_dim, affine=False),
+            nn.Dropout(dropout),
+            nn.Linear(hid_dim, hid_dim),
+        )
+        
+        self.proj_q  = nn.Linear(hid_dim, hid_dim, bias=False) 
+        self.proj_kv = nn.Linear(gene_emb.shape[-1], hid_dim*2, bias=False)
+    
+        
         self.bn = nn.BatchNorm1d(hid_dim, affine=False)
         self.fcmu = nn.Linear(hid_dim, n_topics, 
                               bias=False
@@ -91,10 +104,11 @@ class Encoder(nn.Module):
         masks: masks for valid local spatial neighbors, 1 for valid, 0 invalid (number of valid neighbors may differ)
         batch_labels: the batch assignment lable of the spot/cell 0-T
         """
-        z = self.fc1(self.drop(X))
-        h = self.gelu(z)
-        h = self.bn(h)
-
+        z = self.fc1(X)
+        q = self.proj_q(z)
+        k,v = torch.split(self.proj_kv(self.gene_emb), self.hid_dim, dim=-1)
+        h = F.scaled_dot_product_attention(q, k, v, dropout_p=0)
+        
         logtheta_loc = self.fcmu(h)
         logtheta_logvar = self.normlv(self.fclv(h))
         
@@ -117,12 +131,13 @@ class Encoder(nn.Module):
         return logtheta_loc, theta_scale
     
 
-class SeededNTM(nn.Module):
+class MMSeededNTM(nn.Module):
     """
     Seeded Neural Topic Modelling
     """
     def __init__(self, 
                  input_dim,
+                 gene_emb,
                  out_dim_rna=0,                 
                  init_bg_count=None,
                  init_bg_normal=None,
@@ -132,12 +147,10 @@ class SeededNTM(nn.Module):
                  enc_hid_dim=32,
                  dropout=0.2,
                  clamp_logvar_max=None,
-                 scale_normal_feat=1.0, # deprecated, to be removed
+                 scale_normal_feat=1.0,
                  n_batches=1,
                  wt_fusion_top_seed = 0.5,
                  use_nb_obs = True,
-                 is_group_mode = False,
-                 pos_scale = 0.5, 
                  device=None
                 ):
         """
@@ -151,7 +164,7 @@ class SeededNTM(nn.Module):
         enc_hid_dim: encoding hidden dimension
         dropout: dropout rate for neural layers
         clamp_top_var_max: clampping upper bound for topic variance term (lower model capacity for colapse or nan values)
-        # scale_normal_feat: weight of normal feature loss, larger value will weigh normal observations more (value to be tested in new dataset)
+        scale_normal_feat: weight of normal feature loss, larger value will weigh normal observations more (value to be tested in new dataset)
         n_batches: number of experiment batches (not training batch size)
         # prior_scale_of_nb_disp: hyperparameter scale of the halfcauchy distribution for modelling dispersion parameter of negative binomial observation distribution
         wt_fusion_top_seed: strength of imposing seeded topics over background topics, [0, 1], p would be applied to seed topics, 1-p to background topics
@@ -169,8 +182,6 @@ class SeededNTM(nn.Module):
         self.n_batches = n_batches
         self.wt_fusion_top_seed = wt_fusion_top_seed
         self.device = device
-        self.pos_scale = pos_scale
-        self.is_group_mode = is_group_mode
         
         assert(out_dim_rna > 0 or out_dim_normal > 0, 
                "At least one type of output should be specified, count or normal.")
@@ -187,6 +198,7 @@ class SeededNTM(nn.Module):
 
         self.condition_mask = condition_mask if condition_mask is None else torch.BoolTensor(condition_mask).to(device)
         
+        
         if not self.condition_mask is None:
             self.valid_condition_genes = (self.condition_mask.sum(dim=0) > 0)
             self.seed_mask = torch.BoolTensor(condition_mask).to(device)
@@ -198,6 +210,7 @@ class SeededNTM(nn.Module):
                 
         self.encoder = Encoder(
                 self.input_dim,
+                torch.Tensor(gene_emb).to(device),
                 enc_hid_dim,
                 self.n_topics,
                 n_batches=n_batches,
@@ -317,7 +330,7 @@ class SeededNTM(nn.Module):
             offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
             beta_offset = beta + offset
             _theta = theta[indices]
-            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
                 top_dist_seed = torch.softmax(beta_offset[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
                 top_dist_bg   = torch.softmax(beta_offset[1], dim=-1)
                 lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
@@ -342,7 +355,7 @@ class SeededNTM(nn.Module):
             offset = batch_tau.view(2, -1, 1) * batch_delta[i,:].view(2, 1, -1)
             beta_offset = torch.clamp(beta + offset, 0)
             _theta = theta[indices]
-            if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
                 top_dist_seed = beta_offset[0].masked_fill(self.condition_mask == 0, 0)
                 top_dist_bg   = beta_offset[1]
                 lkl_param[indices] = self.wt_fusion_top_seed * _theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * _theta @ top_dist_bg
@@ -372,7 +385,7 @@ class SeededNTM(nn.Module):
             if softmax:                
                 beta_seeded = torch.zeros_like(beta_offset)
                 
-                if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
+                if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
                     beta_seeded = beta_seeded.masked_fill(self.condition_mask == 0, float('-inf'))
                     beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(beta_seeded.shape[0], -1)
                     beta_seeded[self.seed_mask] = beta_offset[self.seed_mask]
@@ -416,16 +429,16 @@ class SeededNTM(nn.Module):
                     )
             )
             
-        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
-            with pyro.plate(f"Dim_seed_bg", 
-                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
-                bg_seed = pyro.sample(
-                    'bg_seed',
-                    dist.Normal(
-                        torch.zeros(1, device=self.device),
-                        torch.ones(1, device=self.device)
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                with pyro.plate(f"Dim_seed_bg", 
+                                self.valid_condition_genes.shape[0] - self.seed_gene_dim):
+                    bg_seed = pyro.sample(
+                        'bg_seed',
+                        dist.Normal(
+                            torch.zeros(1, device=self.device),
+                            torch.ones(1, device=self.device)
+                        )
                     )
-                )
                 
         if not self.obs_info.normal_obs is None:
             with pyro.plate(f"Dim_normal", self.out_dim_normal):
@@ -541,7 +554,7 @@ class SeededNTM(nn.Module):
                                                                                     bg_seed,
                                                                                     softmax=True)
                 else:
-                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
                         _beta_seeded = beta_rna[0].masked_fill(self.seed_mask == 0, float('-inf'))
                         if self.use_nb_obs and not self.obs_info.count_obs is None:
                             _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
@@ -587,172 +600,117 @@ class SeededNTM(nn.Module):
                                                                                     batch_delta_feat, beta_feat, 
                                                                                     batch_labels, bg_seed)
                 else:
-                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
+                    if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
                         _beta_seeded = beta_feat[0].masked_fill(self.seed_mask == 0, 0)
                         _beta_seeded[:, ~self.valid_condition_genes] = bg_seed.view(1, -1).expand(_beta_seeded.shape[0], -1)
                         top_dist_seed = _beta_seeded
                         top_dist_bg   = beta_feat[1].masked_fill(self.seed_mask == 1, 0)
-                        lkl_param_feat = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
+                        lkl_param_count = self.wt_fusion_top_seed * theta @ top_dist_seed + (1 - self.wt_fusion_top_seed) * theta @ top_dist_bg
                     else:
-                        lkl_param_feat = theta @ beta_feat[0]
-                        
-                        
-            if self.is_group_mode:
-                out = out_counts if self.out_dim_rna > 0 else out_normal
-                assert(not self.condition_mask is None, 'No gene seeds provided, group mode requires gene seeds...')
-                assert(self.wt_fusion_top_seed > 0, 'group mode requires wt_fusion_top_seed > 0.0 ...')
-                # out_group_seed = []
-                # lkl_param_group_seed = [] 
-                # group_param_scale_seed = []
-                for ith, signature in enumerate(self.condition_mask):
-                    out_normal_seed = out[:, signature].mean(dim=-1, keepdim=True)
-                    lkl_param_seed = lkl_param_count[:, signature].mean(dim=-1, keepdim=True) if self.out_dim_rna > 0 else lkl_param_feat[:, signature].mean(dim=-1, keepdim=True)
-                    # out_group_seed.append(out_normal_seed)
-                    # lkl_param_group_seed.append(lkl_param_seed)
-                
-                    normal_scale_seed = disp[signature].sum(dim=-1, keepdim=True) if self.out_dim_rna > 0 else normal_scale[signature].sum(dim=-1, keepdim=True) 
-                    # group_param_scale_seed.append(normal_scale_seed)
-                    with pyro.poutine.scale(scale=self.pos_scale if ith == 0 else 1 - self.pos_scale):
-                        feat  = pyro.sample(f"obs_feat_seed{ith}",
-                            dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1), 
-                            obs=out_normal_seed
-                        ) 
-                
-                # out_normal_seed = torch.hstack(out_group_seed)
-                # lkl_param_seed = torch.hstack(lkl_param_group_seed)
-                # logger.debug(f"{group_param_scale_seed}")
-                # logger.debug(f"{group_param_scale_seed[0]}")
-                # logger.debug(f"{len(group_param_scale_seed)}")
-                
-                # normal_scale_seed = torch.hstack(group_param_scale_seed).view(1, -1)
-                
-                # logger.debug(f"Size of group outs: out_normal {out_normal_seed.shape}, lkl_param {lkl_param_seed.shape}, scale: {normal_scale_seed.shape}")
-                # with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
-                #     feat  = pyro.sample("obs_feat_seed",
-                #         dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1), 
-                #         obs=out_normal_seed
-                #     ) 
+                        lkl_param_feat = theta @ beta_feat
+            
+            if self.out_dim_rna > 0:                    
+                if self.use_nb_obs:
                     
-                # if self.wt_fusion_top_seed < 1.0:                     
-                #     out_normal_bg = out[:, ~self.valid_condition_genes].mean(dim=-1, keepdim=True)
-                #     lkl_param_bg = lkl_param_feat[:, ~self.valid_condition_genes].mean(dim=-1, keepdim=True)
-                #     normal_scale_bg = normal_scale[~self.valid_condition_genes].sum(dim=-1, keepdim=True)
-                    
-                #     with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
-                #         feat  = pyro.sample("obs_feat_bg",
-                #             dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1), 
-                #             obs=out_normal_bg
-                #     )
-                    
-            else:
-                if self.out_dim_rna > 0:                    
-                    if self.use_nb_obs:
-                        
-                        if self.condition_mask is None or self.wt_fusion_top_seed == 0:
-                            total_count = torch.sum(out_counts, -1, keepdim=True)
-                            
-                            inv_disp = 1 / disp**2
-                            mean, inv_disp = broadcast_all(total_count * lkl_param_count + 1e-15, inv_disp)
-                            count = pyro.sample('obs_rna',
-                                                dist.GammaPoisson(inv_disp, inv_disp / mean).to_event(1),
-                                                obs=out_counts)
-                        elif self.wt_fusion_top_seed == 1:
-                            out_counts = out_counts[:, self.valid_condition_genes]
-                            total_count = torch.sum(out_counts, -1, keepdim=True)
-                            lkl_param_count = lkl_param_count[:, self.valid_condition_genes]
-                            disp = disp[self.valid_condition_genes]
-                            
-                            inv_disp = 1 / disp**2
-                            mean, inv_disp = broadcast_all(total_count * lkl_param_count + 1e-15, inv_disp)
-                            count = pyro.sample('obs_rna',
-                                                dist.GammaPoisson(inv_disp, inv_disp / mean).to_event(1),
-                                                obs=out_counts)
-                        else:
-                            out_counts_seed = out_counts[:, self.valid_condition_genes]
-                            total_count_seed = torch.sum(out_counts_seed, -1, keepdim=True)
-                            lkl_param_seed = lkl_param_count[:, self.valid_condition_genes]
-                            disp_seed = disp[self.valid_condition_genes]
-                            
-                            inv_disp_seed = 1 / disp_seed**2
-                            mean_seed, inv_disp_seed = broadcast_all(total_count_seed * lkl_param_seed + 1e-15, inv_disp_seed)
-                            
-                            with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
-                                count = pyro.sample('obs_rna_seed',
-                                                    dist.GammaPoisson(inv_disp_seed, inv_disp_seed / mean_seed).to_event(1),
-                                                    obs=out_counts_seed)
-                                
-                            out_counts_bg = out_counts[:, ~self.valid_condition_genes]
-                            total_count_bg = torch.sum(out_counts_bg, -1, keepdim=True)
-                            lkl_param_bg = lkl_param_count[:, ~self.valid_condition_genes]
-                            disp_bg = disp[~self.valid_condition_genes]
-                            
-                            inv_disp_bg = 1 / disp_bg**2
-                            mean_bg, inv_disp_bg = broadcast_all(total_count_bg * lkl_param_bg + 1e-15, inv_disp_bg)
-                                
-                            with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
-                                count = pyro.sample('obs_rna_bg',
-                                                    dist.GammaPoisson(inv_disp_bg, inv_disp_bg / mean_bg).to_event(1),
-                                                    obs=out_counts_bg)                    
-                    else:
-                        if self.condition_mask is None or self.wt_fusion_top_seed == 0:
-                            total_count = int(out_counts.sum(-1).max())
-                            count = pyro.sample('obs_rn',
-                                            dist.Multinomial(total_count, lkl_param_count),
-                                            obs=out_counts)
-                        elif self.wt_fusion_top_seed == 1:
-                            total_count = int(out_counts[:, self.valid_condition_genes].sum(-1).max())
-                            count = pyro.sample('obs_rna',
-                                            dist.Multinomial(total_count, lkl_param_count[:, self.valid_condition_genes]),
-                                            obs=out_counts[:, self.valid_condition_genes])
-                        else:
-                            total_count_seed = int(out_counts[:, self.valid_condition_genes].sum(-1).max())
-                            total_count_bg = int(out_counts[:, ~self.valid_condition_genes].sum(-1).max())
-                            with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
-                                count = pyro.sample('obs_seed',
-                                                dist.Multinomial(total_count_seed, lkl_param_count[:, self.valid_condition_genes]),
-                                                obs=out_counts[:, self.valid_condition_genes])
-                            with pyro.poutine.scale(scale=1-self.wt_fusion_top_seed):
-                                count = pyro.sample('obs_bg',
-                                                dist.Multinomial(total_count_bg, lkl_param_count[:, ~self.valid_condition_genes]),
-                                                obs=out_counts[:, ~self.valid_condition_genes])
-                            
-                                
-                if self.out_dim_normal > 0:
-                    # with pyro.poutine.scale(scale=self.scale_normal_feat):
                     if self.condition_mask is None or self.wt_fusion_top_seed == 0:
-                        feat  = pyro.sample("obs_feat",
-                                dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
-                                obs=out_normal
-                        )
+                        total_count = torch.sum(out_counts, -1, keepdim=True)
+                        
+                        inv_disp = 1 / disp**2
+                        mean, inv_disp = broadcast_all(total_count * lkl_param_count + 1e-15, inv_disp)
+                        count = pyro.sample('obs_rna',
+                                            dist.GammaPoisson(inv_disp, inv_disp / mean).to_event(1),
+                                            obs=out_counts)
                     elif self.wt_fusion_top_seed == 1:
-                        out_normal = out_normal[:, self.valid_condition_genes]
-                        lkl_param_feat = lkl_param_feat[:, self.valid_condition_genes]
-                        normal_scale = normal_scale[self.valid_condition_genes]
+                        out_counts = out_counts[:, self.valid_condition_genes]
+                        total_count = torch.sum(out_counts, -1, keepdim=True)
+                        lkl_param_count = lkl_param_count[:, self.valid_condition_genes]
+                        disp = disp[self.valid_condition_genes]
                         
-                        feat  = pyro.sample("obs_feat",
-                                dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
-                                obs=out_normal
-                            )
+                        inv_disp = 1 / disp**2
+                        mean, inv_disp = broadcast_all(total_count * lkl_param_count + 1e-15, inv_disp)
+                        count = pyro.sample('obs_rna',
+                                            dist.GammaPoisson(inv_disp, inv_disp / mean).to_event(1),
+                                            obs=out_counts)
                     else:
-                        out_normal_seed = out_normal[:, self.valid_condition_genes]
-                        lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                        out_counts_seed = out_counts[:, self.valid_condition_genes]
+                        total_count_seed = torch.sum(out_counts_seed, -1, keepdim=True)
+                        lkl_param_seed = lkl_param_count[:, self.valid_condition_genes]
+                        disp_seed = disp[self.valid_condition_genes]
                         
-                        normal_scale_seed = normal_scale[self.valid_condition_genes]
+                        inv_disp_seed = 1 / disp_seed**2
+                        mean_seed, inv_disp_seed = broadcast_all(total_count_seed * lkl_param_seed + 1e-15, inv_disp_seed)
                         
                         with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
-                            feat  = pyro.sample("obs_feat_seed",
-                                dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1), 
-                                obs=out_normal_seed
-                            )                        
-                        out_normal_bg = out_normal[:, ~self.valid_condition_genes]
-                        lkl_param_bg = lkl_param_feat[:, ~self.valid_condition_genes]
-                        normal_scale_bg = normal_scale[~self.valid_condition_genes]
+                            count = pyro.sample('obs_rna_seed',
+                                                dist.GammaPoisson(inv_disp_seed, inv_disp_seed / mean_seed).to_event(1),
+                                                obs=out_counts_seed)
+                            
+                        out_counts_bg = out_counts[:, ~self.valid_condition_genes]
+                        total_count_bg = torch.sum(out_counts_bg, -1, keepdim=True)
+                        lkl_param_bg = lkl_param_count[:, ~self.valid_condition_genes]
+                        disp_bg = disp[~self.valid_condition_genes]
+                        
+                        inv_disp_bg = 1 / disp_bg**2
+                        mean_bg, inv_disp_bg = broadcast_all(total_count_bg * lkl_param_bg + 1e-15, inv_disp_bg)
                             
                         with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
-                            feat  = pyro.sample("obs_feat_bg",
-                                dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1), 
-                                obs=out_normal_bg
-                            )
+                            count = pyro.sample('obs_rna_bg',
+                                                dist.GammaPoisson(inv_disp_bg, inv_disp_bg / mean_bg).to_event(1),
+                                                obs=out_counts_bg)                    
+                else:
+                    if self.condition_mask is None or self.wt_fusion_top_seed == 0:
+                        total_count = int(out_counts.sum(-1).max())
+                        count = pyro.sample('obs_rna',
+                                        dist.Multinomial(total_count, lkl_param_count),
+                                        obs=out_counts)
+                    elif self.wt_fusion_top_seed == 1:
+                        total_count = int(out_counts[:, self.valid_condition_genes].sum(-1).max())
+                        count = pyro.sample('obs_rna',
+                                        dist.Multinomial(total_count, lkl_param_count[:, self.valid_condition_genes]),
+                                        obs=out_counts[:, self.valid_condition_genes])
+                    else:
+                        total_count_seed = int(out_counts[:, self.valid_condition_genes].sum(-1).max())
+                        total_count_bg = int(out_counts[:, ~self.valid_condition_genes].sum(-1).max())
+                        with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
+                            count = pyro.sample('obs_seed',
+                                            dist.Multinomial(total_count_seed, lkl_param_count[:, self.valid_condition_genes]),
+                                            obs=out_counts[:, self.valid_condition_genes])
+                        with pyro.poutine.scale(scale=1-self.wt_fusion_top_seed):
+                            count = pyro.sample('obs_bg',
+                                            dist.Multinomial(total_count_bg, lkl_param_count[:, ~self.valid_condition_genes]),
+                                            obs=out_counts[:, ~self.valid_condition_genes])
+                        
+                            
+            if self.out_dim_normal > 0:
+                # with pyro.poutine.scale(scale=self.scale_normal_feat):
+                
+                if self.condition_mask is None or self.wt_fusion_top_seed == 0:
+                        feat  = pyro.sample("obs_feat",
+                            dist.Normal(lkl_param_feat, normal_scale).to_event(1), 
+                            obs=out_normal
+                        )
+                elif self.wt_fusion_top_seed == 1:
+                    lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                    normal_scale_seed = normal_scale[self.valid_condition_genes]
+                    feat = pyro.sample('obs_feat',
+                                        dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1),
+                                        obs=out_normal)
+                else:
+                    lkl_param_seed = lkl_param_feat[:, self.valid_condition_genes]
+                    normal_scale_seed = normal_scale[self.valid_condition_genes]
+                    
+                    with pyro.poutine.scale(scale=self.wt_fusion_top_seed):
+                        feat = pyro.sample('obs_feat_seed',
+                                        dist.Normal(lkl_param_seed, normal_scale_seed).to_event(1),
+                                        obs=out_normal)
+                        
+                    lkl_param_bg = lkl_param_feat[:, ~self.valid_condition_genes]
+                    normal_scale_bg = normal_scale[~self.valid_condition_genes]
+                        
+                    with pyro.poutine.scale(scale= 1 - self.wt_fusion_top_seed):
+                        feat = pyro.sample('obs_feat_bg',
+                                        dist.Normal(lkl_param_bg, normal_scale_bg).to_event(1),
+                                        obs=out_normal)
         
                     
     def guide(self, input, out_counts=None, out_normal=None, batch_labels=None):
@@ -769,24 +727,22 @@ class SeededNTM(nn.Module):
                 constraint=constraints.positive
             )
             
+            if not self.condition_mask is None and self.wt_fusion_top_seed > 0:
+                self.seed_bg_loc = pyro.param(
+                        'seed_bg_loc',
+                        self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
+                    )
+                self.seed_bg_scale = pyro.param(
+                    'seed_bg_scale',
+                    self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
+                    constraint=constraints.positive
+                )
+                with pyro.plate(f"Dim_seed_bg", 
+                            self.valid_condition_genes.shape[0] - self.seed_gene_dim):
+                    pyro.sample("bg_seed", dist.Normal(self.seed_bg_loc, self.seed_bg_scale))
+        
             with pyro.plate(f"Dim_rna", self.out_dim_rna):
                 pyro.sample("disp", dist.LogNormal(self.disp_loc, self.disp_scale))
-            
-        if not self.condition_mask is None and self.wt_fusion_top_seed > 0 and self.valid_condition_genes.sum() < self.condition_mask.shape[1]:
-            self.seed_bg_loc = pyro.param(
-                    'seed_bg_loc',
-                    self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
-                )
-            self.seed_bg_scale = pyro.param(
-                'seed_bg_scale',
-                self._ones_init((self.valid_condition_genes.shape[0] - self.seed_gene_dim)),
-                constraint=constraints.positive
-            )
-            with pyro.plate(f"Dim_seed_bg", 
-                        self.valid_condition_genes.shape[0] - self.seed_gene_dim):
-                pyro.sample("bg_seed", dist.Normal(self.seed_bg_loc, self.seed_bg_scale))
-        
-            
                 
             
                 
@@ -1011,9 +967,12 @@ class SeededNTM(nn.Module):
         adjust = torch.log(bg + pseudocount) - torch.log(bg)
         beta = beta - adjust
         
-        top_dist_seed = torch.softmax(beta[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
-        top_dist_bg   = torch.softmax(beta[1], dim=-1)
-        top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
+        if not self.condition_mask is None and self.wt_fusion_top_seed > 0:            
+            top_dist_seed = torch.softmax(beta[0].masked_fill(self.condition_mask == 0, float('-inf')), dim=-1)
+            top_dist_bg   = torch.softmax(beta[1], dim=-1)
+            top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
+        else:
+            top_dist = torch.softmax(beta[0], dim=-1)
         return top_dist.cpu()
     
     def beta_normal(self, pseudocount=0.1):
@@ -1024,41 +983,32 @@ class SeededNTM(nn.Module):
             logger.warning('No normal feature output is modelled, no beta for normal features, return None')
             return None
         
-        tau = self.mean(self.tau_loc[:self.n_topics*2] if self.obs_info.count_obs is None else self.tau_loc[2*self.n_topics:], 
-                        self.tau_scale[:self.n_topics*2] if self.obs_info.count_obs is None else self.tau_scale[2*self.n_topics:])
+        tau = self.mean(self.tau_loc[:self.n_topics] if self.obs_info.count_obs is None else self.tau_loc[2*self.n_topics:], 
+                        self.tau_scale[:self.n_topics] if self.obs_info.count_obs is None else self.tau_scale[2*self.n_topics:])
         delta = self.mean(self.delta_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id], 
                           self.delta_scale[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id])
         lambda_ = self.mean(self.lambda_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id], 
                             self.lambda_scale[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id])
-        caux = self.mean(self.caux_loc[:2] if self.obs_info.count_obs is None else self.caux_loc[2:], 
-                         self.caux_scale[:2] if self.obs_info.count_obs is None else self.caux_scale[2:])
+        caux = self.mean(self.caux_loc[0] if self.obs_info.count_obs is None else self.caux_loc[2:], 
+                         self.caux_scale[0] if self.obs_info.count_obs is None else self.caux_scale[2:])
 
-        noise = self.noise_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
-        
         lambda_tilde = self._compute_lambda_tilde_batch(caux, tau, delta, lambda_)
             
-        beta = 0 + noise.view(2, noise.shape[0], noise.shape[1]//2) * lambda_tilde
+        noise = self.noise_loc[:, self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id]
         
-        beta = torch.clamp(beta, min=0)
+        beta = 0 + noise.view(2, noise.shape[0], noise.shape[1]//2) * lambda_tilde
         
         bg = (self.bg_loc[self.obs_info.normal_obs.start_id:self.obs_info.normal_obs.end_id].view(2, 1, -1) 
               + self.init_bg_feat.view(1, 1, -1)).exp()
 
         if pseudocount > 0:
-            pseudocount0 = torch.quantile(bg[0], q=pseudocount)
-            pseudocount1 = torch.quantile(bg[1], q=pseudocount)
-            pseudocount = torch.concat([pseudocount0.view(1,1,1),pseudocount1.view(1,1,1) ], dim=0)
+            pseudocount = torch.quantile(bg, q=pseudocount)
         else:
             pseudocount = 0
-            
+        
         adjust = torch.log(bg + pseudocount) - torch.log(bg)
         beta = beta - adjust
-        
-        top_dist_seed = beta[0].masked_fill(self.condition_mask == 0, 0)
-        top_dist_bg   = beta[1]
-        top_dist = self.wt_fusion_top_seed * top_dist_seed + (1 - self.wt_fusion_top_seed) * top_dist_bg
-        
-        return top_dist.cpu()
+        return beta.cpu()
 
 
     def beta(self, pseudocount=0.1, return_beta_rna=True, return_beta_normal=False):

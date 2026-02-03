@@ -8,8 +8,9 @@ from dataclasses import dataclass
 @dataclass
 class ExpData:
     input_rep: Union[np.ndarray, list]=None
+    gene_emb: Union[np.ndarray]=None
     init_bg_rna: Union[np.array, list]=None
-    init_bg_gau: Union[np.array, list]=None
+    init_bg_img: Union[np.array, list]=None
     out_counts: Union[sparray, spmatrix, np.ndarray, None]=None
     out_normal: Union[sparray, spmatrix, np.ndarray, None]=None
     batch_labels: Union[np.array, list, pd.Series, None]=None
@@ -35,9 +36,6 @@ class MyDataset(Dataset):
         self.input = input
         if issparse(out_counts):
             out_counts = out_counts.toarray()
-            
-        if issparse(out_normal):
-            out_normal = out_normal.toarray()
         self.out_counts = out_counts
         self.out_normal = out_normal
         self.batch_labels = batch_labels
